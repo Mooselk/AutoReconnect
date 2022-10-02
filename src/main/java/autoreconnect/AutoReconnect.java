@@ -1,13 +1,31 @@
 package autoreconnect;
 
+import static java.lang.Math.ceil;
+import static java.lang.Math.min;
+import static org.apache.logging.log4j.LogManager.getRootLogger;
+
+import java.util.List;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import autoreconnect.config.GuiTransformers;
 import autoreconnect.config.ModConfig;
-import autoreconnect.event.*;
+import autoreconnect.config.ModConfig.ServerMessages;
+import autoreconnect.event.DisconnectListener;
+import autoreconnect.event.DisconnectScreenRenderListener;
+import autoreconnect.event.PlayerJoinedListener;
+import autoreconnect.event.ScreenChangedListener;
+import autoreconnect.event.ServerEntryChangedListener;
 import me.shedaniel.autoconfig.AutoConfig;
 import me.shedaniel.autoconfig.gui.registry.GuiRegistry;
 import me.shedaniel.autoconfig.serializer.JanksonConfigSerializer;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.gui.screen.ConnectScreen;
@@ -20,21 +38,20 @@ import net.minecraft.client.network.ServerAddress;
 import net.minecraft.client.network.ServerInfo;
 import net.minecraft.client.util.Window;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.text.Text;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
 
-import java.util.List;
-
-import static autoreconnect.config.ModConfig.*;
-import static java.lang.Math.ceil;
-import static java.lang.Math.min;
-import static org.apache.logging.log4j.LogManager.getRootLogger;
-
-public class AutoReconnect implements ModInitializer, DisconnectScreenRenderListener, DisconnectListener, ClientTickEvents.StartTick, PlayerJoinedListener, ScreenChangedListener, ServerEntryChangedListener {
-    private int attempt = -1;
+public class AutoReconnect implements ModInitializer, DisconnectScreenRenderListener, DisconnectListener, ClientTickEvents.StartTick, PlayerJoinedListener, ScreenChangedListener, ServerEntryChangedListener, PlayerBlockBreakEvents.Before  {
+    
+	private int attempt = -1;
     private int ticks = -1;
 
     private ServerInfo server = null;
 
+    public static final Logger LOGGER = LogManager.getLogger("AutoForage");
+    
     @Override
     public void onInitialize() {
         ClientTickEvents.START_CLIENT_TICK.register(this);
@@ -43,7 +60,11 @@ public class AutoReconnect implements ModInitializer, DisconnectScreenRenderList
         DisconnectScreenRenderListener.EVENT.register(this);
         ScreenChangedListener.EVENT.register(this);
         ServerEntryChangedListener.EVENT.register(this);
-
+        
+        PlayerBlockBreakEvents.BEFORE.register(((world, player, pos, state, entity) -> {
+			return state.getBlock() == Blocks.DARK_OAK_LOG || state.getBlock() == Blocks.DARK_OAK_LEAVES;
+		}));
+        
         AutoConfig.register(ModConfig.class, JanksonConfigSerializer::new);
         GuiRegistry registry = AutoConfig.getGuiRegistry(ModConfig.class);
         registry.registerPredicateTransformer(
@@ -97,7 +118,8 @@ public class AutoReconnect implements ModInitializer, DisconnectScreenRenderList
     @Override
     public void onRender(MatrixStack matrices, int reasonHeight) {
         Window window = MinecraftClient.getInstance().getWindow();
-        TextRenderer renderer = MinecraftClient.getInstance().textRenderer;
+        @SuppressWarnings("resource")
+		TextRenderer renderer = MinecraftClient.getInstance().textRenderer;
         final String text = attempt < 0 ? "Could not reconnect" : "Reconnect in %d...".formatted((int) ceil(ticks / 20.0));
         renderer.draw(matrices, text,
             (window.getScaledWidth() - renderer.getWidth(text)) / 2F, // centered horizontally
@@ -115,27 +137,14 @@ public class AutoReconnect implements ModInitializer, DisconnectScreenRenderList
             resetAttempts("no more attempts configured");
         }
     }
-
+    
     @Override
     public void onPlayerJoined(ClientPlayerEntity player) {
         // return if this was not a reconnect
         if (attempt < 0) return;
         resetAttempts("successfully reconnected");
-        // send configured messages for this server
-        ServerMessages serverMessages = getConfig().getServerMessages();
-        // if server address equals this servers address and theres at least one message configured
-        if (server.address.equals(serverMessages.getServerAddress()) && serverMessages.getMessages().length > 0) {
-            // create a thread to send each message with a certain delay
-            // TODO use timer instead and make it based on game ticks similar to the reconnect timer
-            new Thread(() -> {
-                try {
-                    for (String message : serverMessages.getMessages()) {
-                        player.sendChatMessage(message);
-                        Thread.sleep(serverMessages.getDelay());
-                    }
-                } catch (InterruptedException ignored) { }
-            }).start();
-        }
+        
+        ResetPlayer.run(player);
     }
 
     @Override
@@ -146,9 +155,15 @@ public class AutoReconnect implements ModInitializer, DisconnectScreenRenderList
         }
     }
 
+    
     public void resetAttempts(String reason) {
         ticks = -1;
         attempt = -1;
         getRootLogger().info(reason == null ? "RESET" : "RESET, reason: " + reason);
     }
+
+	@Override
+	public boolean beforeBlockBreak(World world, PlayerEntity player, BlockPos pos, BlockState state, BlockEntity blockEntity) {
+		return false;
+	}
 }
